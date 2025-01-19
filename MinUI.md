@@ -1,17 +1,98 @@
 # MinUI CodeBase Analysis
 
-## General
+# General
 At the highest level, MinUI (much like OnionOS) is not an OS, but rather a UI/configuration platform laid on top of the device's stock OS. This comes with some interesting limitations and benefits. 
 
 The cool part is that boring things like input, bluetooth/wifi, display drivers come free - we don't have to implement any of those. The annoying part is that we're locked into existing architecture/drivers. In the event of something like the RGXX where the manufacturer hasn't extracted all the device's power out of it at launch, we can't throw our own drivers at it.
 
-## How does it work? 
+# How does it work? 
 
 Start by reading the `/usr/trimui/bin/runtrimui.sh` section of Services.md before diving in here.
 
-As mentioned there, the Bricks initialization service looks for 3 shell scripts (`/mnt/SDCARD/trimui/app/premainui.sh`, `/mnt/SDCARD/trimui/app/MainUI` and  `/mnt/SDCARD/trimui/app/preload.sh`) , and runs them as root before the stock OS if they exist. This opens up a ton of potential for loading...we can literally do whatever we want here. 
+##  First boot
+As mentioned there, the Bricks initialization service looks for 3 shell scripts 
+	
+- `/mnt/SDCARD/trimui/app/premainui.sh`
+- `/mnt/SDCARD/trimui/app/MainUI`
+- `/mnt/SDCARD/trimui/app/preload.sh`
+	
+ and runs them as root before the stock OS if they exist. 
+ 
+ *This opens up a ton of potential for loading...we can literally do whatever we want here.*
 
-In MinUIs case, they just replace `/usr/trimui/bin/runtrimui.sh` and have it call `/mnt/SDCARD/.tmp_update/updater`
+### On MinUI, the installation process works as follows: 
+1. MinUI mounts a `/mnt/SDCARD/trimui/app/MainUI` script. 
+2. The stock `/usr/trimui/bin/runtrimui.sh` runs and calls `/mnt/SDCARD/trimui/app/MainUI`
+
+3. `/mnt/SDCARD/trimui/app/MainUI` (defined in `<MINUI_REPO>/BOOT/trimui/app/MainUI`) runs: 
+	- 	Makes a backup of `/usr/trimui/bin/runtrimui.sh` called `/usr/trimui/bin/runtrimui-original.sh` and copies their own verion of `runtrimui.sh` if there isn't already.
+	- Copies the `/.tmp_update` file to the root of the sd card.
+	- Removes the `trimui` folder from the root of the sd card.
+	- clears the file read buffer with `sync`. 
+	- Runs `/mnt/SDCARD/.tmp_update/updater` and turns off the device 
+
+
+## `/skeleton/BOOT/trimui/app/MainUI a.k.a /mnt/SDCARD/trimui/app/MainUI`
+```sh
+#!/bin/sh
+
+# installer for trimuismart and tg5040
+
+SDCARD_PATH=/mnt/SDCARD
+cd "$SDCARD_PATH/trimui/app"
+
+# smart pro/brick
+if [ -f /usr/trimui/bin/runtrimui.sh ] && [ ! -f /usr/trimui/bin/runtrimui-original.sh ]; then
+	mv /usr/trimui/bin/runtrimui.sh /usr/trimui/bin/runtrimui-original.sh
+	cp ./runtrimui.sh /usr/trimui/bin/
+# smart
+elif [ ! -f /etc/main.original ]; then
+	cp /etc/main /etc/main.original
+	cp ./main.sh /etc/main
+fi
+
+# .tmp_update/updater does the actual installation (and later, updating)
+cp -rf .tmp_update $SDCARD_PATH/
+rm -rf "$SDCARD_PATH/trimui"
+sync
+$SDCARD_PATH/.tmp_update/updater
+
+poweroff # under no circumstances should stock be allowed to touch this card
+
+```
+
+4. Since they've replaced `/usr/trimui/bin/runtrimui.sh` which runs on every boot, after installing MinUI, every subsequent boot will simply call `/mnt/SDCARD/.tmp_update/updater`.
+
+### `skeleton/BOOT/trimui/app/runtrimui.sha.k.a /usr/trimui/bin/runtrimui.sh`
+```sh
+#!/bin/sh
+
+# becomes /usr/trimui/bin/runtrimui.sh on tg5040/tg3040
+
+#wait for SDCARD mounted
+mounted=`cat /proc/mounts | grep SDCARD`
+cnt=0
+while [ "$mounted" == "" ] && [ $cnt -lt 6 ] ; do
+   sleep 0.5
+   cnt=`expr $cnt + 1`
+   mounted=`cat /proc/mounts | grep SDCARD`
+done
+
+UPDATER_PATH=/mnt/SDCARD/.tmp_update/updater
+if [ -f "$UPDATER_PATH" ]; then
+	"$UPDATER_PATH"
+else
+	/usr/trimui/bin/runtrimui-original.sh
+fi
+
+```
+5. As seen below this is simply a universal platform launcher to launch the coorelated `/mnt/SDCARD/.tmp_update/$PLATFORM.sh` (in the case of the brick `/mnt/SDCARD/.tmp_update/tg3040.sh`) file which is from `<MINUI_REPO>/workspace/<PLATFORM>/install` 
+
+
+	This will set the platform env variable and run the associated platform specific start script (e.g `/mnt/SDCARD/.tmp_update/tg3040.sh`).
+
+### `/mnt/SDCARD/.tmp_update/updater`
+
 ```sh
 #!/bin/sh
 
@@ -53,16 +134,15 @@ echo u > /proc/sysrq-trigger
 echo o > /proc/sysrq-trigger
 ```
 
-This will set the platform env variable and run the associated platform specific start script (e.g `/mnt/SDCARD/.tmp_update/tg3040.sh`).
 
-In the case of `/mnt/SDCARD/.tmp_update/tg3040.sh` we have the following script which
+6. In the case of `/mnt/SDCARD/.tmp_update/tg3040.sh` we have the following script which
 
 - Sets the CPU to the max performance of 2.0Ghz
 - Checks if there's an update to run (MinUI.zip) and extracts it to the ``/mnt/SDCARD/.system` directory if necessary (this is part of the core installation process).
 - Runs the MinUI.pak/launch.sh and continues to run and prevents any other processes from doing anything afterward by immediately powering off.
 (I don't quite understand how the while loop exits other than if `MinUI.pak/launch.sh` deletes itself?).
 
-
+## `/mnt/SDCARD/.tmp_update/tg3040.sh`
 
 ```sh
 #!/bin/sh
@@ -111,13 +191,13 @@ done
 poweroff # under no circumstances should stock be allowed to touch this card
 ```
 
-`/mnt/SDCARD/.system/tg3040/paks/MinUI.pak/launch.sh` is copied from `skeleton/SYSTEM/tg3040/paks/MinUI.pak/launch.sh` which at a high level: 
+7. `/mnt/SDCARD/.system/tg3040/paks/MinUI.pak/launch.sh` is copied from `skeleton/SYSTEM/tg3040/paks/MinUI.pak/launch.sh` which at a high level: 
 
-- "Mounts" the SD caard paths for standard video game stuff (Roms, Bios, etc)
-- Brilliantly exports the platform specific linker/PATH directories.
-- Ensures inputs are turned on.
-- Sets the CPU to the max speed of 2 Ghz
-- It looks like it checks for a operation that was request to execute at `/tmp/minui_exec`, then execute anything that was request to run at `/tmp/next`.
+	- "Mounts" the SD caard paths for standard video game stuff (Roms, Bios, etc)
+	- Brilliantly exports the platform specific linker/PATH directories.
+	- Ensures inputs are turned on.
+	- Sets the CPU to the max speed of 2 Ghz
+	- It looks like it checks for a operation that was request to execute at `/tmp/minui_exec`, then execute 	anything that was request to run at `/tmp/next`.
 
 
 ```sh
@@ -230,6 +310,9 @@ poweroff # just in case
 ```
 
 `<MINUI_CODE>workspace/all/minui/minui.c:945` manages putting the next command in the queue (`NEXT_PATH`) in  its `static void queueNext(char* cmd)` function.
+
+
+TLRD: We can just override `.tmp_update/tg3040.sh` for the time being.
 
 
 
