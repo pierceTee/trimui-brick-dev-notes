@@ -1,13 +1,211 @@
 # OnionOS CodeBase Analysis
 
-## Current changes to try and get it running
+## Dev Notes
+### 1-19-25
+
+#### Current changes to try and get it running
 1. Added mising libraries and scripts from [aemiii91/miyoomini-toolchain:latest](https://github.com/OnionUI/dev-miyoomini-toolchain) to [my arm64 toolchain](https://github.com/pierceTee/arm64-tg3040-toolchain).
 2.  Changed `.tmp_update/updater` to 'tg3040.sh` to match what the `runtrimui.sh` script is expecting after installing minui (I can change this script later).
-3. Added `Onion/static/build/miyoo/lib/libpadsp.so` to `SDCARD/=/miyoo/app/.tmp_update/lib` ( I should probably just copy this to `usr/trimui/lib`)
-4. Comment out the `mv ./romscreens/*` bit from the `<SDCARD>/miyoo/appp/MainUI` script to prevent that failure.
+3. Added line to copy  `Onion/static/build/miyoo/lib/libpadsp.so` to `SDCARD/=/miyoo/app/.tmp_update/lib` ( I should probably just copy this to `usr/trimui/lib`) in `miyoo/app/.tmp_update/install.sh`.
+4. Comment out the `mv ./romscreens/*` bit from the `<SDCARD>/miyoo/appp/MainUI`/`static/dist/miyoo/app/MainUI` script to prevent that failure.
 5. Change usage of `-not` flag to `!` from `find` command on line 26 of `<SDCARD>/miyoo/appp/MainUI` since the brick's version of find doesn't support it.
-## High Level Analysis 
+6. set `$DEVICE_ID` to `$MODEL_MMP` in  `miyoo/app/.tmp_update/install.sh` / `/mnt/SDCARD/.tmp_update/install.sh`
 
+
+- Installation got pretty well along with the above changes but fails with 7z. 
+
+Turns out the linking of the .tmp_update libs and binaries isn't allowing me to run those binaries. 
+
+in fact, I can't even run the binaries directly from the folders themselves...I should try getting my own 7z binary and running that.
+
+### 1-20-25
+
+Looks like all the binaries that Onion relies on are 32-bit armhf and the brick doesn't have all the proper 32bit libraries (in 7zs case, `libc:armhf`) installed to run them. Further, I haven't got `opkg` manager working. Looks like I need to transfer those binaries over manually in the install (unless we're compiling these binaries ourselves but I don't think we do). I should try comiling in their default container for sanity check...
+
+First attempt to resolve is to manually move the linux armf 32-bit compatability library `ld-linux-armhf.so.3` to `<SDCARD>/miyoo/app/.tmp_update/lib` this should resolve the issue during install but I'll probably want to move this to `lib` so we don't run into compatibility issues during normal runtime operations.
+
+
+**UPDATE**: Idk why I'm just now noticing but the mini is 32-bit arm and the brick is 64bit....this is going to be A LOT more work than I thought lol.
+
+I've written scripts to get some required 32bit libs and put them on the brick but the dependency issues continue to cascade, I think it would be better to just redo everything in 64bit unfortunately.
+
+Here's the changes I'm trying to build everything for 64bit.
+
+1. remove `-m32` flags in `third-party/RetroArch-patch/submodules/RetroArch/Makefile`
+2. update `-32` references to `-m64` in 
+
+    a. `third-party/RetroArch-patch/submodules/RetroArch/deps/bearssl-0.6/conf/Unix32.mk`
+
+    b. ~~`third-party/RetroArch-patch/submodules/RetroArch/deps/xxHash/Makefile`~~ I don't think this one is required.
+
+    c. `third-party/RetroArch-patch/submodules/RetroArch/deps/xxHash/tests/bench/Makefile`
+
+3. I need to look into replacing `ARMV7` compiler flags with `AMRV8`?
+
+### 1-22-25
+
+Had a few revalations today about my past attemptt: 
+
+#### Running 32bit applications on the brick
+Due to the fact that when the OS reads `LD_LIBRARY_PATH` left to right for libraries to link, if I prepend 32bit libraries, then 32bit applications will work fine, but if I run a 64bit application that depends on a library that we also have a 32bit version of, it will first link with the 32bit version and fail to launch. The inverse will happen if we prepend the 64bit library path. The only real solution is to prepend the path with the correct lib path before launching any application (not a realistic soltution).
+
+This should be resolvable by using the bricks `/lib` and `/lib64` folders to place 32 and 64bit libraries respectively, although in practice this requires us to install 32bit versions of every library Onion would require. I think the correct move going forward would be to create a solid 64bit fork of onion that can be ported to other systems.
+
+The alternative here is to simply 
+
+```
+root@TinaLinux:/mnt/SDCARD/.tmp_update/logs# cat install.log
+:: Check firmware
+:: Backup system
+:: Remove configs
+File /mnt/SDCARD/.tmp_update/onion.pak exists.
+File /mnt/SDCARD/.tmp_update/onion.pak has write permission.
+No process is currently writing to /mnt/SDCARD/.tmp_update/onion.pak.
+File /mnt/SDCARD/.tmp_update/onion.pak size:  bytes.
+
+:: Install Onion
+   - Extract '/mnt/SDCARD/.tmp_update/onion.pak' into /mnt/SDCARD
+File /mnt/SDCARD/.tmp_update/onion.pak exists.
+File /mnt/SDCARD/.tmp_update/onion.pak has write permission.
+No process is currently writing to /mnt/SDCARD/.tmp_update/onion.pak.
+File /mnt/SDCARD/.tmp_update/onion.pak size:  bytes.
+
+onion.pak exists
+File /mnt/SDCARD/.tmp_update/onion.pak exists.
+File /mnt/SDCARD/.tmp_update/onion.pak has write permission.
+No process is currently writing to /mnt/SDCARD/.tmp_update/onion.pak.
+File /mnt/SDCARD/.tmp_update/onion.pak size:  bytes.
+
+7Z is NOT running and should be
+onion.pak still exists
+:: Installation failed!
+```
+looks like 7z isn't running correctly...check line 676 of   `miyoo/app/.tmp_update/install.sh`
+
+
+## Project overview
+
+### Makefile analysis
+
+- Typical usage is expected to utilize the toolchain to build using `make with-toolchain` and following up with `make release`. Contrary to MinUI, the toolchain used does not dictate the resulting architecture the project it sbuild for.
+
+- **Architecture descsions**: I can't yet say with certainty where they're all made but there are certainly a ton of `-m32` and `ARMV7` flags used for retroarch builds throughout. 
+
+### Rules
+
+- **all**: 
+    1. Calls `dist`.
+
+- **version**: 
+    1. Used to get the `VERSION` string defined at the top of the Makefile.
+
+- **print-version**: 
+    1. Pretty prints `VERSION` along with the RetroArch `RA_SUBVERSION` string defined at the top of the Makefile.
+
+- **$(CACHE)/.setup**: 
+    1. Uses the `/cache` directory to sync files to the build directory.
+    2. Syncs `static/build` files to `/build`.
+    3. Syncs `static/dist` files to `/dist`. This is particularly interesting because `dist` seems to house the distribution/release files (lib files included).
+    4. Copies over `/lib` library files to `/miyoo/app/.tmp_update/lib` for use on the device. This is where every library file used in installation comes from.
+    5. Sets version information into related info files.
+    6. Copies all `res` directories from key applications `gameSwitcher`, `chargingState`, `bootScreen`, `themeSwitcher`, `tweaks`, `randomGamePicker`, and `easter`. This is likely the minimum list of applications I need to ensure are ported first.
+    7. Copies all script files from `packageManager` and `themeSwitcher` to `/.tmp_update/script/` (these are used for installation and need to be investigated).
+    8. Downloads themes for release.
+    9. Copies static config files (should be fine to leave alone).
+    10. Copies static packages from `static/packages` to `SDCARD/App|Emu|RaApp` and runs `packages/common/apply.sh` on the directories. This copies all the config files to the relevant app folders. It also runs `packages/common/auto_advmenu.rc.sh` which looks like it copies specific advanced menu settings like `rompath`, `imgpath`, and `rel_dir` to RetroArch configs.
+    11. Creates fullres files: Running `/.github/create_fullres_files.sh` it adds blank files for DS and SNK emulation that seem to indicate to the emulators to launch in 560p.
+    12. Creates an empty setup file potentially to misdirect the Makefile into skipping building if the cache has been built.
+
+- **build**: 
+    1. Runs `core`, `apps`, and `external`.
+
+- **core**: 
+    1. Begins by running `$(CACHE)/.setup`.
+    2. Enters each `src/[Application Name]` folder and builds their content using a standard `make` command, piping the output into `build/.tmp_update/bin`. Seeing how no direct compiler flags seem to be set at the individual `src/[Application Name]/Makefile` level, we should be able to override `CFLAGS` and `LDFLAGS` at the highest level to use 64-bit libraries in order to compile for ARM64.
+    3. Copies build dependencies from `/build/.tmp_update/bin` to `/miyoo/app/.tmp_update/bin`, all of which were built in the previous step except 7z. It might actually be compiled as a RetroArch submodule under `/third-party/RetroArch-patch/submodules/RetroArch/deps/7zip`.
+
+- **apps**: 
+    1. Begins by running `$(CACHE)/.setup`.
+    2. Enters into the associated `src` directory, builds, and copies the build to the associated `[SDCARD]/Apps` directory for `batteryMonitorUI`, `playActivityUI`, `packageManager`, `clock`, and `randomGamePicker`.
+
+- **$(THIRD_PARTY_DIR)/RetroArch-patch/bin/retroarch_miyoo354**:
+    1. Builds `third-party/RetroArch-patch`.
+
+- **external**: 
+    1. Begins by running `$(CACHE)/.setup` and `$(THIRD_PARTY_DIR)/RetroArch-patch/bin/retroarch_miyoo354` (effectively setting up the build directories and building RetroArch).
+    2. Copies RetroArch `RetroArch-patch/bin` directory to `build/Retroarch` and runs `build/.tmp_update/script/build_ext_cache.sh` which looks like it builds a per-core cache.
+    3. Builds third-party `Search`, `Filter`, `Terminal`, and `DinguxCommander` apps.
+
+- **dist**:
+    1. Begins by running `build`.
+    2. Creates `configs`, `retroarch`, and `Onion` packages using the host machine's `7zip`.
+
+- **release**: 
+    1. Begins by running `dist`.
+    2. Zips up the release directory into its own package.
+
+- **clean**: 
+    1. Removes `build`, `cache`, `test`, `dist`, and `configs` directories.
+    2. Ensures `$(CACHE)/.setup` is removed so we rebuild the cache.
+    3. Removes any `.o` files from `include` and `src` directories.
+
+- **deepclean**: 
+    1. Calls `clean`, but also clears out `RetroArch-patch`, `SearchFilter`, `Terminal`, and `DinguxCommander` builds.
+
+- **dev**:
+    1. Calls `clean`.
+    2. Calls unset `MAKE_DEV` string (might be nice to override this flag during testing).
+
+- **asan**:
+    1. Calls `clean`.
+    2. Calls unset `MAKE_ASAN_` string.
+
+- **git-clean**:
+    1. Cleans up git files by running `git clean` and excluding vscode files.
+
+- **git-submodules**:
+    1. Updates git submodules.
+
+- **pwd**:
+    1. Emits the root directory as a string.
+
+- **$(CACHE)/.docker**: 
+    1. Re-pulls the toolchain docker image.
+    2. Makes the cache directory and creates a `cache/.docker` file to indicate it ran.
+
+- **toolchain**: 
+    1. Calls `$(CACHE)/.docker`.
+    2. Puts the user in a bash shell of the toolchain image with the project mounted in the `/workspace` directory.
+
+- **with-toolchain**:
+    1. Calls `$(CACHE)/.docker`.
+    2. Runs the container headless and calls `make` with any of the supplied user commands.
+
+- **patch**: 
+    1. Runs `.github/create_patch.sh`.
+
+- **external-libs**:
+    1. Rebuilds `include/SDL`.
+
+- **test**:
+    1. Builds `external-libs`.
+    2. Runs `infoPanel_test_data` test.
+
+- **static-analysis**:
+    1. Runs `external-libs`.
+    2. Runs `cppcheck` on the `include` and `src` directories.
+
+- **format**:
+    1. Applies the clang format styling to your working directory.
+
+
+So when running `make`, the following sequence of calls is made:
+
+1. `$(CACHE)/.setup`
+2. `core`
+3. `apps`
+4. `$(THIRD_PARTY_DIR)/RetroArch-patch/bin/retroarch_miyoo354`
+5. `external`
 ## Building Onion
 
 Checkout the [official onion dev documentation](https://onionui.github.io/docs/dev/setup) before continuing. 
@@ -55,8 +253,6 @@ For the time being I'll update my toolchain to more closely match [aemiii91/miyo
   example: `docker run --platform linux/arm64 -it --rm -v "/home/pierce/dev/TrimUIOnionTest/":/root/workspace   arm64-tg3040-onion-toolchain /bin/bash`
 
 **note**: I'd like to set all this up in scripts once I start building more regularly. 
-
-
 
 ## Installation process
 
