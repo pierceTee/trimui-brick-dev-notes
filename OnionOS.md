@@ -10,7 +10,23 @@
 4. Comment out the `mv ./romscreens/*` bit from the `<SDCARD>/miyoo/appp/MainUI`/`static/dist/miyoo/app/MainUI` script to prevent that failure.
 5. Change usage of `-not` flag to `!` from `find` command on line 26 of `<SDCARD>/miyoo/appp/MainUI` since the brick's version of find doesn't support it.
 6. set `$DEVICE_ID` to `$MODEL_MMP` in  `miyoo/app/.tmp_update/install.sh` / `/mnt/SDCARD/.tmp_update/install.sh`
+7. change `$CROSS_COMPILE` and compiler flags in `third-party/RetroArch-patch/src/gfx/video_filters/make`
+```
+# Set up cross-compilation flags
+CFLAGS = -march=armv8-a -mcpu=cortex-a53 -mtune=cortex-a53
+LDFLAGS = -march=armv8-a
+export CFLAGS LDFLAGS
+```
+to makefile to ensure all builds have compiler flag override. 
 
+8. Attempt to replace all the 32bit binaries in the lib folder.
+
+    1. `libgfx` and `libSDL_rotozoom.so` can both be build from the `/include` directory. 
+    2. `sqlite3.so` and `sql3.so.0` can both be built from [sqlite.org](https://sqlite.org/download.html)
+    3. `libpng.so` can be built from [libpng.org](http://www.libpng.org/pub/png/libpng.html)
+    4. `libkbinput.so` is a [custom library for universal keyboard support](https://github.com/OnionUI/Onion/pull/1253) that can be built in `/workspace/third-party/SearchFilter/src/kbinput`. need to `export CROSS_COMPILE="aarch64-linux-gnu-"` before trying to build or it'll default to the aarm32 miyoo mini toolchain to compile.
+
+    5. `libshmvar.so` 
 
 - Installation got pretty well along with the above changes but fails with 7z. 
 
@@ -51,7 +67,6 @@ Due to the fact that when the OS reads `LD_LIBRARY_PATH` left to right for libra
 
 This should be resolvable by using the bricks `/lib` and `/lib64` folders to place 32 and 64bit libraries respectively, although in practice this requires us to install 32bit versions of every library Onion would require. I think the correct move going forward would be to create a solid 64bit fork of onion that can be ported to other systems.
 
-The alternative here is to simply 
 
 ```
 root@TinaLinux:/mnt/SDCARD/.tmp_update/logs# cat install.log
@@ -82,7 +97,26 @@ onion.pak still exists
 ```
 looks like 7z isn't running correctly...check line 676 of   `miyoo/app/.tmp_update/install.sh`
 
+### 1-23-25
 
+The original toolchain (and my toolchain by proxy) have a script called `support/setup-env.sh`
+
+```sh
+export PATH="/opt/miyoomini-toolchain/usr/bin:${PATH}:/opt/miyoomini-toolchain/usr/arm-linux-gnueabihf/sysroot/bin"
+export CROSS_COMPILE=/opt/miyoomini-toolchain/usr/bin/arm-linux-gnueabihf-
+export PREFIX=/opt/miyoomini-toolchain/usr/arm-linux-gnueabihf/sysroot/usr
+export UNION_PLATFORM=miyoomini
+```
+
+This should be looked into to making cross compilation a lot easier. 
+Tons of makefiles depend on these ENV variables to choose a compiler.
+
+Toolchains should mount all their relevant files to `opt/[toolchainname]` then use a script like above to set ENV variables for compilation.
+
+
+**Update** Try using the aarm64 toolchain here https://github.com/shauninman/miyoomini-toolchain-buildroot-aarch64
+
+It looks like I can use the base toolchain and set `TOOLCHAIN_ARCH=aarch64` see [dev-miyoomini-toolchain](https://github.com/OnionUI/dev-miyoomini-toolchain/blob/main/support/setup-toolchain.sh)
 ## Project overview
 
 ### Makefile analysis
